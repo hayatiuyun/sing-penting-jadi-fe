@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   Calendar,
   MessageSquare,
@@ -8,6 +8,14 @@ import {
   FileText,
   Send
 } from 'lucide-react'
+
+import {
+  getLeaveBalance,
+  getLeaveRequests,
+  getTeamRequests,
+  sendAIMessage,
+  updateLeaveStatus
+} from '../services/leaveApi'
 
 interface LeaveBalance {
   annual: number
@@ -40,6 +48,13 @@ interface ChatMessage {
 
 type TabType = 'dashboard' | 'chat' | 'approvals'
 
+interface NewLeaveRequest {
+  type: string
+  startDate: string
+  endDate: string
+  reason: string
+}
+
 const UOBLeaveSystem: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('dashboard')
   const [chatInput, setChatInput] = useState<string>('')
@@ -51,92 +66,80 @@ const UOBLeaveSystem: React.FC = () => {
     }
   ])
 
-  // Mock data
-  const leaveBalance: LeaveBalance = {
-    annual: 14,
-    medical: 12,
-    compassionate: 3
+  const [showForm, setShowForm] = useState(false)
+
+  const [formData, setFormData] = useState<NewLeaveRequest>({
+    type: 'Annual Leave',
+    startDate: '',
+    endDate: '',
+    reason: ''
+  })
+
+  const USER_ID = 1 // logged-in user
+  const MANAGER_ID = 3 // for manager view
+
+  const [leaveBalance, setLeaveBalance] = useState<LeaveBalance | null>(null)
+  const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([])
+  const [teamRequests, setTeamRequests] = useState<TeamRequest[]>([])
+
+  const calculateDays = (start: string, end: string): number => {
+    const s = new Date(start)
+    const e = new Date(end)
+    return (e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24) + 1
   }
 
-  const leaveRequests: LeaveRequest[] = [
-    {
-      id: 1,
-      type: 'Annual Leave',
-      dates: 'Dec 20-22, 2025',
-      days: 3,
-      status: 'Pending',
-      reason: 'Family vacation'
-    },
-    {
-      id: 2,
-      type: 'Medical Leave',
-      dates: 'Dec 10, 2025',
-      days: 1,
-      status: 'Approved',
-      reason: 'Medical checkup'
-    },
-    {
-      id: 3,
-      type: 'Annual Leave',
-      dates: 'Nov 15-17, 2025',
-      days: 3,
-      status: 'Approved',
-      reason: 'Personal matters'
+  const handleSubmitLeave = async () => {
+    if (!formData.startDate || !formData.endDate || !formData.reason) {
+      alert('Please fill in all fields')
+      return
     }
-  ]
 
-  const teamRequests: TeamRequest[] = [
-    {
-      id: 1,
-      employee: 'Sarah Chen',
-      type: 'Annual Leave',
-      dates: 'Dec 23-27, 2025',
-      days: 5,
-      status: 'Pending'
-    },
-    {
-      id: 2,
-      employee: 'Michael Tan',
-      type: 'Medical Leave',
-      dates: 'Dec 18, 2025',
-      days: 1,
-      status: 'Pending'
+    const days = calculateDays(formData.startDate, formData.endDate)
+
+    try {
+      const res = await createLeaveRequest({
+        userId: USER_ID,
+        type: formData.type,
+        startDate: formData.startDate,
+        endDate: formData.endDate,
+        days,
+        reason: formData.reason
+      })
+
+      setLeaveRequests((prev) => [res.data, ...prev])
+      setShowForm(false)
+      setFormData({
+        type: 'Annual Leave',
+        startDate: '',
+        endDate: '',
+        reason: ''
+      })
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to submit leave')
     }
-  ]
+  }
 
-  const handleChatSubmit = (): void => {
+  const handleChatSubmit = async () => {
     if (!chatInput.trim()) return
 
-    const userMessage: string = chatInput
-    setChatMessages([...chatMessages, { role: 'user', content: userMessage }])
+    const userMessage = chatInput
+    setChatMessages((prev) => [...prev, { role: 'user', content: userMessage }])
     setChatInput('')
 
-    // Simulate AI response
-    setTimeout(() => {
-      let aiResponse: string = ''
-      const lowerMessage = userMessage.toLowerCase()
+    const res = await sendAIMessage(userMessage, USER_ID)
 
-      if (lowerMessage.includes('leave') || lowerMessage.includes('request')) {
-        aiResponse =
-          'I can help you submit a leave request. What type of leave do you need? (Annual, Medical, or Compassionate) And for which dates?'
-      } else if (lowerMessage.includes('balance')) {
-        aiResponse = `Your current leave balance is: Annual Leave: ${leaveBalance.annual} days, Medical Leave: ${leaveBalance.medical} days, Compassionate Leave: ${leaveBalance.compassionate} days.`
-      } else if (lowerMessage.includes('annual')) {
-        aiResponse =
-          "For annual leave, please provide the dates you'd like to take off. I'll check availability and process your request."
-      } else {
-        aiResponse =
-          'I understand. I can help you with leave requests, checking balances, or viewing your leave history. What would you like to do?'
-      }
-      setChatMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: aiResponse }
-      ])
-    }, 1000)
+    setChatMessages((prev) => [...prev, res.data])
   }
 
-  const handleApproval = (id: number, decision: string): void => {
-    alert(`Leave request #${id} has been ${decision}`)
+  const handleApproval = async (
+    requestId: number,
+    decision: 'Approved' | 'Rejected'
+  ) => {
+    await updateLeaveStatus(requestId, decision, MANAGER_ID)
+
+    setTeamRequests((prev) => prev.filter((req) => req.id !== requestId))
+
+    alert(`Leave request ${decision}`)
   }
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>): void => {
@@ -152,6 +155,26 @@ const UOBLeaveSystem: React.FC = () => {
       : 'bg-yellow-100 text-yellow-800'
   }
 
+  useEffect(() => {
+    const loadData = async () => {
+      const [balanceRes, requestRes] = await Promise.all([
+        getLeaveBalance(USER_ID),
+        getLeaveRequests(USER_ID)
+      ])
+
+      setLeaveBalance(balanceRes.data)
+      setLeaveRequests(requestRes.data)
+    }
+
+    loadData()
+  }, [])
+
+  useEffect(() => {
+    if (activeTab === 'team') {
+      getTeamRequests(MANAGER_ID).then((res) => setTeamRequests(res.data))
+    }
+  }, [activeTab])
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -159,8 +182,7 @@ const UOBLeaveSystem: React.FC = () => {
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between py-4">
             <div className="flex items-center space-x-3">
-              <div className="text-2xl font-bold text-red-600">|||</div>
-              <div className="text-2xl font-bold text-blue-900">UOB</div>
+              <img src="/images.png" className="h-auto w-20" />
             </div>
             <div className="flex items-center space-x-2">
               <User className="size-5 text-gray-600" />
@@ -216,16 +238,26 @@ const UOBLeaveSystem: React.FC = () => {
           <div className="space-y-6">
             {/* Leave Balance Cards */}
             <div>
-              <h2 className="mb-4 text-2xl font-bold text-gray-900">
-                Leave Balance
-              </h2>
+              <div className="inline-flex w-full items-center justify-between">
+                <h2 className="mb-4 text-2xl font-bold text-gray-900">
+                  Leave Balance
+                </h2>
+                <div className="mb-4 flex justify-end">
+                  <button
+                    onClick={() => setShowForm(true)}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
+                  >
+                    Request Leave
+                  </button>
+                </div>
+              </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div className="rounded-lg bg-white p-6 shadow">
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm text-gray-600">Annual Leave</p>
                       <p className="text-3xl font-bold text-blue-600">
-                        {leaveBalance.annual}
+                        {leaveBalance?.annual}
                       </p>
                       <p className="text-xs text-gray-500">days remaining</p>
                     </div>
@@ -237,7 +269,7 @@ const UOBLeaveSystem: React.FC = () => {
                     <div>
                       <p className="text-sm text-gray-600">Medical Leave</p>
                       <p className="text-3xl font-bold text-green-600">
-                        {leaveBalance.medical}
+                        {leaveBalance?.medical}
                       </p>
                       <p className="text-xs text-gray-500">days remaining</p>
                     </div>
@@ -251,7 +283,7 @@ const UOBLeaveSystem: React.FC = () => {
                         Compassionate Leave
                       </p>
                       <p className="text-3xl font-bold text-purple-600">
-                        {leaveBalance.compassionate}
+                        {leaveBalance?.compassionate}
                       </p>
                       <p className="text-xs text-gray-500">days remaining</p>
                     </div>
@@ -437,6 +469,70 @@ const UOBLeaveSystem: React.FC = () => {
           </div>
         )}
       </div>
+
+      {showForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-lg">
+            <h3 className="mb-4 text-lg font-semibold">New Leave Request</h3>
+
+            <div className="space-y-4">
+              <select
+                value={formData.type}
+                onChange={(e) =>
+                  setFormData({ ...formData, type: e.target.value })
+                }
+                className="w-full rounded-lg border p-2"
+              >
+                <option>Annual Leave</option>
+                <option>Medical Leave</option>
+                <option>Compassionate Leave</option>
+              </select>
+
+              <input
+                type="date"
+                value={formData.startDate}
+                onChange={(e) =>
+                  setFormData({ ...formData, startDate: e.target.value })
+                }
+                className="w-full rounded-lg border p-2"
+              />
+
+              <input
+                type="date"
+                value={formData.endDate}
+                onChange={(e) =>
+                  setFormData({ ...formData, endDate: e.target.value })
+                }
+                className="w-full rounded-lg border p-2"
+              />
+
+              <textarea
+                placeholder="Reason"
+                value={formData.reason}
+                onChange={(e) =>
+                  setFormData({ ...formData, reason: e.target.value })
+                }
+                className="w-full rounded-lg border p-2"
+              />
+            </div>
+
+            <div className="mt-6 flex justify-end space-x-2">
+              <button
+                onClick={() => setShowForm(false)}
+                className="rounded-lg border px-4 py-2"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSubmitLeave}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-white"
+              >
+                Submit
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
